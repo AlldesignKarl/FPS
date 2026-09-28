@@ -22,8 +22,8 @@ function Get-YesNoFromFinding {
 
 function Build-TextReport {
     param($Static, $Analysis, $Plan, $ProcUsage, $Meta)
-    $L = New-Object System.Collections.Generic.List[string]
-    function Add([string]$s = '') { $L.Add($s) }
+    $lines = New-Object System.Collections.Generic.List[string]
+    function Add([string]$text = '') { $lines.Add($text) }
     function Sec([string]$t) { Add ''; Add ('=' * 78); Add "  $t"; Add ('=' * 78) }
     $m = $Analysis.Metrics
     $nv = $Static.GPUs | Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1
@@ -58,7 +58,7 @@ function Build-TextReport {
              elseif ($m.RobloxGpuNv -and $m.RobloxGpuNv.Avg -ge 1) { "la NVIDIA $(if ($nv) { $nv.Name }) (uso 3D medio de Roblox en la NVIDIA: $(Format-N $m.RobloxGpuNv.Avg)%; en la integrada: $(Format-N $(if ($m.RobloxGpuOther) { $m.RobloxGpuOther.Avg } else { 0 }))%)." }
              else { 'no determinado (los contadores de GPU de Windows no mostraron actividad de Roblox).' }
     Add "6. GPU que usa Roblox: $rbGpu"
-    foreach ($l in @($Meta.NvSmiRobloxLines)) { Add "   nvidia-smi: $("$l".Trim())" }
+    foreach ($nvLine in @($Meta.NvSmiRobloxLines)) { Add "   nvidia-smi: $("$nvLine".Trim())" }
     Add "7. Thermal throttling: $(Get-YesNoFromFinding $Analysis 'THERMAL' 'SI, hay limitacion termica' 'POSIBLE, temperaturas altas' 'NO detectado en esta captura')"
     Add "8. La CPU como cuello de botella: $(Get-YesNoFromFinding $Analysis 'CPU' 'SI, la CPU limita los FPS' 'POSIBLE, la CPU esta muy cargada' 'NO parece ser el limite')"
     Add "9. La GPU como cuello de botella: $(Get-YesNoFromFinding $Analysis 'GPU' 'SI, la GPU limita los FPS' 'POSIBLE, la GPU esta muy cargada' 'NO parece ser el limite')"
@@ -172,5 +172,5 @@ function Build-TextReport {
     Add '- El diagnostico consume un poco de CPU mientras mide (una consulta cada pocos segundos).'
     if (-not $Analysis.Frames) { Add '- Sin PresentMon no hay FPS ni frame time reales; el cuello de botella se deduce de uso/frecuencias.' }
     if (-not $Meta.IsAdmin) { Add '- Sin permisos de administrador PresentMon no puede medir FPS.' }
-    return ($L -join "`r`n")
+    return ($lines -join "`r`n")
 }

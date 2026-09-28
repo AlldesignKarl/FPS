@@ -184,16 +184,18 @@ $meta = [pscustomobject]@{
     Date = (Get-Date).ToString('yyyy-MM-dd HH:mm'); ToolVersion = $ToolVersion; IsAdmin = $isAdmin
     CaptureSeconds = [math]::Round($elapsed); FpsSource = $fpsSource; NvSmiRobloxLines = @($nvRobloxLines)
 }
-$report = Build-TextReport -Static $static -Analysis $analysis -Plan $plan -ProcUsage $procUsage -Meta $meta
-
 # ---------------------------------------------------------------- 5. Guardado
-$txt = Join-Path $OutDir 'informe.txt'
-$report | Out-File $txt -Encoding UTF8
+# Primero los datos en bruto: si algo falla despues, la medicion no se pierde.
 # Export-Csv usa las columnas del primer objeto: se fija la union de todas.
 $cols = @($samples | ForEach-Object { $_.PSObject.Properties.Name } | Select-Object -Unique)
 if ($cols.Count) { $samples | Select-Object -Property $cols | Export-Csv (Join-Path $OutDir 'muestras.csv') -NoTypeInformation -Encoding UTF8 }
 [pscustomobject]@{ Meta = $meta; Static = $static; Analysis = $analysis; Plan = $plan; Processes = $procUsage } |
     ConvertTo-Json -Depth 8 | Out-File (Join-Path $OutDir 'diagnostico.json') -Encoding UTF8
+
+$report = Build-TextReport -Static $static -Analysis $analysis -Plan $plan -ProcUsage $procUsage -Meta $meta
+
+$txt = Join-Path $OutDir 'informe.txt'
+$report | Out-File $txt -Encoding UTF8
 
 Write-Host ''
 Write-Host "  RESULTADO PRELIMINAR: $($analysis.Verdict)" -ForegroundColor Green

@@ -104,10 +104,30 @@ Assert ($byId['FPS_CAP'].State -eq 'RECOMENDADA') 'Limite de FPS detectado'
 Assert ($byId['GPU_SELECT'].State -eq 'OPCIONAL') 'Roblox ya en NVIDIA sin preferencia => opcional'
 Assert ($byId['DRIVER'].State -eq 'RECOMENDADA') 'Driver de hace 30 meses => actualizar'
 
-$meta = [pscustomobject]@{ Date = 'hoy'; ToolVersion = 'test'; IsAdmin = $true; CaptureSeconds = 90; FpsSource = 'test'; NvSmiRobloxLines = @() }
+$meta = [pscustomobject]@{ Date = 'hoy'; ToolVersion = 'test'; IsAdmin = $true; CaptureSeconds = 90; FpsSource = 'test'; NvSmiRobloxLines = @('|    0   N/A  N/A      8123    C+G   ...\RobloxPlayerBeta.exe      N/A      |') }
 $txt = Build-TextReport -Static $static -Analysis $a -Plan $plan -ProcUsage $procs -Meta $meta
 Assert ($txt -match 'RESPUESTAS A TUS 10 PREGUNTAS' -and $txt -match '920MX' -and $txt -match 'DDR3') 'El informe se genera'
 Assert ($txt -match '8\. La CPU como cuello de botella: SI') 'Pregunta 8 responde SI en caso CPU'
+Assert ($txt -match 'nvidia-smi: .*RobloxPlayerBeta') 'El informe incluye las lineas de nvidia-smi con Roblox'
+
+Write-Host 'Codigo'
+# Windows PowerShell no distingue mayusculas en variables: $L y $l son la misma.
+$collisions = foreach ($file in Get-ChildItem $src -Recurse -Filter *.ps1) {
+    $tk = $null; $pe = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tk, [ref]$pe)
+    foreach ($fn in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        $map = @{}
+        foreach ($v in $fn.FindAll({ $args[0] -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+            $n = $v.VariablePath.UserPath
+            if ($n -match ':') { continue }
+            $k = $n.ToLowerInvariant()
+            if (-not $map.ContainsKey($k)) { $map[$k] = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal) }
+            [void]$map[$k].Add($n)
+        }
+        foreach ($k in $map.Keys) { if ($map[$k].Count -gt 1) { "$($file.Name) $($fn.Name): $(@($map[$k]) -join '/')" } }
+    }
+}
+Assert (@($collisions).Count -eq 0) "Sin variables que solo difieren en mayusculas $(@($collisions) -join '; ')"
 
 Write-Host ''
 Write-Host "Resultado: $script:pass OK, $script:fail FAIL"
