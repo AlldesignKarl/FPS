@@ -11,16 +11,21 @@ rendimiento, no se aplica.
 
 La fase 1 **no modifica nada** en el ordenador. Solo mide y propone.
 
-### Cómo usarlo
+### Cómo usarlo (una sola línea)
 
-1. Descarga esta carpeta en el portátil (botón *Code → Download ZIP* en GitHub y descomprímela).
-2. Doble clic en **`EJECUTAR_DIAGNOSTICO.bat`** (pedirá permisos de administrador; solo se
-   usan para medir FPS con PresentMon).
-3. Si pregunta por PresentMon, responde **S**: es la herramienta oficial y de código abierto
-   de Intel para medir FPS/frame time. Se descarga de su GitHub oficial y se verifica su firma digital.
-4. Abre Roblox → ERLC con tus gráficos habituales y el cargador conectado, vuelve a la
-   ventana y pulsa ENTER. Tienes 10 s para volver al juego; juega normal hasta oír el pitido (90 s).
-5. Se abre `informe.txt`. Pégalo en el chat (o súbelo) para revisar juntos las optimizaciones.
+1. Pulsa **tecla Windows + R**, escribe `powershell` y pulsa Enter.
+2. Pega esta línea y pulsa Enter:
+
+   ```powershell
+   irm https://raw.githubusercontent.com/AlldesignKarl/FPS/refs/heads/claude/magical-hopper-b7gkdd/instalar.ps1 | iex
+   ```
+3. Cuando Windows pregunte si permites cambios, pulsa **Sí** (solo se usa para medir FPS).
+4. Conecta el cargador, abre Roblox → ERLC y juega normal. La medición empieza sola
+   y al acabar suenan dos pitidos.
+5. El informe queda **copiado automáticamente**: pégalo en el chat con Ctrl+V.
+
+El programa se instala en `%LOCALAPPDATA%\GpuBooster920MX`. Alternativa sin PowerShell:
+descargar el ZIP de la rama y ejecutar `EJECUTAR_DIAGNOSTICO.bat`.
 
 Los resultados se guardan en `reports\diagnostico_FECHA\`:
 

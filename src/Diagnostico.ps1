@@ -38,6 +38,16 @@ function Write-Step([string]$t) { Write-Host "  > $t" -ForegroundColor Cyan }
 function Write-Ok([string]$t)   { Write-Host "    $t" -ForegroundColor Gray }
 function Write-Warn2([string]$t){ Write-Host "    ! $t" -ForegroundColor Yellow }
 
+# Si algo falla, se muestra el error y la ventana NO se cierra sola.
+trap {
+    Write-Host ''
+    Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  En: $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkRed
+    Write-Host '  Haz una foto o copia este mensaje y pegalo en el chat.' -ForegroundColor Yellow
+    if (-not $NoPrompt) { [void](Read-Host '  Pulsa ENTER para cerrar') }
+    break
+}
+
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 Clear-Host
 Write-Host ''
@@ -75,15 +85,11 @@ if ($nvSmi) { $nvFields = (Get-NvFields -Exe $nvSmi -Fields $script:NvSampleFiel
 $pmExe = Find-PresentMon -ToolsDir $ToolsDir
 $fpsSource = 'no disponible'
 if (-not $pmExe -and $isAdmin -and -not $NoPrompt -and (Test-IsWindows)) {
-    Write-Host ''
-    Write-Host '  Para medir FPS y frame time REALES se usa PresentMon, la herramienta' -ForegroundColor White
-    Write-Host '  oficial y de codigo abierto de Intel (github.com/GameTechDev/PresentMon).' -ForegroundColor White
-    Write-Host '  Solo lee los eventos de presentacion de fotogramas de Windows; no toca Roblox.' -ForegroundColor White
-    $ans = Read-Host '  Descargarla ahora a la carpeta tools\ ? (S/N)'
-    if ($ans -match '^[sSyY]') {
-        try { $pmExe = Install-PresentMon -ToolsDir $ToolsDir; Write-Ok "Descargado y firma verificada: $pmExe" }
-        catch { Write-Warn2 "No se pudo descargar: $($_.Exception.Message)" }
-    }
+    # PresentMon: medidor de FPS oficial y de codigo abierto de Intel. Solo lee
+    # los eventos de presentacion de fotogramas de Windows; no toca Roblox.
+    Write-Step 'Descargando PresentMon (medidor de FPS oficial de Intel)...'
+    try { $pmExe = Install-PresentMon -ToolsDir $ToolsDir; Write-Ok "Listo, firma digital verificada: $([IO.Path]::GetFileName($pmExe))" }
+    catch { Write-Warn2 "No se pudo descargar ($($_.Exception.Message)). Se medira sin FPS." }
 }
 if ($pmExe -and -not $isAdmin) { Write-Warn2 'PresentMon encontrado pero necesita administrador; se omite.'; $pmExe = $null }
 
@@ -94,16 +100,32 @@ $ramMB = [double]$static.RAM.TotalMB
 if (-not $NoPrompt) {
     Write-Host ''
     Write-Host '  ------------------------------------------------------------' -ForegroundColor White
-    Write-Host "  CAPTURA DE $SampleSeconds SEGUNDOS MIENTRAS JUEGAS" -ForegroundColor White
-    Write-Host '   1) Abre Roblox y entra en Emergency Response: Liberty County.' -ForegroundColor White
-    Write-Host '   2) Usa tus graficos habituales y conecta el cargador.' -ForegroundColor White
-    Write-Host '   3) Vuelve aqui y pulsa ENTER. Tendras 10 s para volver al juego.' -ForegroundColor White
-    Write-Host '   4) Juega normal (conduce por la ciudad) hasta oir el pitido final.' -ForegroundColor White
-    Write-Host '  (Si pulsas ENTER sin Roblox abierto se mide el sistema en reposo.)' -ForegroundColor DarkGray
-    [void](Read-Host '  Pulsa ENTER cuando estes listo')
-    if (@(Get-RobloxProcesses).Count -eq 0) { Write-Warn2 'Roblox no esta abierto: se medira en reposo.' }
-    for ($i = 10; $i -ge 1; $i--) { Write-Host "`r    Empieza en $i s...  " -NoNewline -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
-    Write-Host ''
+    Write-Host '   AHORA:' -ForegroundColor White
+    Write-Host '    1) Conecta el cargador.' -ForegroundColor White
+    Write-Host '    2) Abre Roblox y entra en Emergency Response: Liberty County' -ForegroundColor White
+    Write-Host '       con tus graficos de siempre.' -ForegroundColor White
+    Write-Host '    3) Juega normal (conduce por la ciudad).' -ForegroundColor White
+    Write-Host "   La medicion empieza SOLA y dura $SampleSeconds s. Al acabar oiras dos pitidos." -ForegroundColor White
+    Write-Host '  ------------------------------------------------------------' -ForegroundColor White
+    $idle = $false
+    if (@(Get-RobloxProcesses).Count -eq 0) {
+        Write-Host '   Esperando a que abras Roblox... (o pulsa ENTER aqui para medir sin juego)' -ForegroundColor Yellow
+        while (@(Get-RobloxProcesses).Count -eq 0) {
+            $key = $false
+            try { if ([Console]::KeyAvailable) { $key = ([Console]::ReadKey($true).Key -eq 'Enter') } } catch {}
+            if ($key) { $idle = $true; break }
+            Start-Sleep -Seconds 2
+        }
+        # Margen para que el juego cargue y entres en el servidor.
+        if (-not $idle) { $wait = 60; Write-Ok 'Roblox detectado. Te doy 60 s para que cargue y entres en el servidor.' }
+    } else {
+        $wait = 10; Write-Ok 'Roblox ya esta abierto. Vuelve al juego.'
+    }
+    if (-not $idle) {
+        for ($i = $wait; $i -ge 1; $i--) { Write-Host "`r    La medicion empieza en $i s...   " -NoNewline -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+        Write-Host ''
+        try { [Console]::Beep(660, 200) } catch {}
+    }
 }
 
 $procBefore = Get-ProcSnapshot
@@ -177,5 +199,15 @@ Write-Host ''
 Write-Host "  RESULTADO PRELIMINAR: $($analysis.Verdict)" -ForegroundColor Green
 if ($frames) { Write-Host ("  FPS medios {0}  |  1% low {1}  |  min {2}  |  max {3}" -f (Format-N $frames.FpsAvg 1), (Format-N $frames.Fps1Low 1), (Format-N $frames.FpsMin 1), (Format-N $frames.FpsMax 1)) -ForegroundColor Green }
 Write-Host "  Informe guardado en: $OutDir" -ForegroundColor White
-Write-Host '  Envia el archivo informe.txt (o pega su contenido) para revisar juntos las optimizaciones.' -ForegroundColor White
-if ((Test-IsWindows) -and -not $NoPrompt) { Start-Process notepad.exe -ArgumentList "`"$txt`"" }
+$copied = $false
+if ((Test-IsWindows) -and -not $NoPrompt) {
+    try { Set-Clipboard -Value $report; $copied = $true } catch {}
+    Start-Process notepad.exe -ArgumentList "`"$txt`""
+}
+Write-Host ''
+if ($copied) {
+    Write-Host '  EL INFORME YA ESTA COPIADO. Ve al chat y pulsa Ctrl+V para pegarlo.' -ForegroundColor Green
+} else {
+    Write-Host '  Copia el contenido de informe.txt (Ctrl+A, Ctrl+C) y pegalo en el chat.' -ForegroundColor Green
+}
+if (-not $NoPrompt) { [void](Read-Host '  Pulsa ENTER para cerrar esta ventana') }
