@@ -34,15 +34,22 @@ function Get-OptimizationPlan {
     $game = $Analysis.UsedGameData
 
     # 1. GPU usada por Roblox --------------------------------------------------
-    $onIgpu = @($Analysis.Findings | Where-Object { $_.Title -match 'GPU INTEGRADA' }).Count -gt 0
+    $gsel = Get-RobloxGpuVerdict -Metrics $m -UsedGameData $game
     $prefs = @($Static.Roblox.GpuPreferences)
+    $running = $Static.Roblox.Running | Select-Object -First 1
+    $isStore = $running -and $running.Path -match 'WindowsApps'
     $latest = $Static.Roblox.Installs | Select-Object -First 1
-    $prefOk = $latest -and @($prefs | Where-Object { $_.Path -eq $latest.Path -and $_.Value -match 'GpuPreference=2' }).Count -gt 0
-    $usesNv = $m.RobloxGpuNv -and $m.RobloxGpuNv.Avg -ge 1
-    $state = if ($onIgpu) { 'RECOMENDADA' } elseif ($usesNv -and $prefOk) { 'YA CORRECTO' } elseif ($usesNv) { 'OPCIONAL' } else { 'RECOMENDADA' }
-    $why = if ($onIgpu) { 'Medido: Roblox esta usando la GPU integrada.' }
-           elseif ($usesNv) { "Medido: Roblox ya renderiza en la NVIDIA (uso medio $(Format-N $m.RobloxGpuNv.Avg)%). $(if (-not $prefOk) { 'Pero no hay preferencia de Windows para la version actual: cada actualizacion de Roblox cambia la carpeta del .exe y la eleccion depende solo del perfil del driver.' })" }
-           else { 'No se pudo confirmar que GPU usa Roblox (juego cerrado o dGPU sin actividad).' }
+    $prefOk = @($prefs | Where-Object { $_.Value -match 'GpuPreference=2' -and (($isStore -and $_.Path -match 'ROBLOXCorporation') -or ($latest -and $_.Path -eq $latest.Path)) }).Count -gt 0
+    $onIgpu = $gsel.Code -eq 'IGPU'
+    $usesNv = $gsel.Code -eq 'NVIDIA'
+    $state = if ($onIgpu) { 'RECOMENDADA' } elseif ($gsel.Code -eq 'DUDA') { 'PENDIENTE' } elseif ($usesNv -and $prefOk) { 'YA CORRECTO' } elseif ($usesNv) { 'OPCIONAL' } else { 'RECOMENDADA' }
+    $why = switch ($gsel.Code) {
+        'IGPU'   { "Medido: Roblox esta usando la GPU integrada. $($gsel.Evidence -join '; ')." }
+        'NVIDIA' { "Medido: Roblox usa la NVIDIA. $($gsel.Evidence -join '; ').$(if ($prefOk) { ' Ya existe la preferencia de Windows de alto rendimiento.' })" }
+        'DUDA'   { "Los datos se contradicen: $($gsel.Evidence -join '; '). Hay que confirmarlo antes de tocar nada." }
+        default  { 'No se pudo confirmar que GPU usa Roblox (juego cerrado o sin actividad de GPU).' }
+    }
+    if ($isStore) { $why += ' Estas usando la version de Microsoft Store de Roblox.' }
     [void]$plan.Add((New-Opt 'GPU_SELECT' 'Forzar la NVIDIA 920MX para Roblox' $state $why `
         'Crear la preferencia oficial de Windows "Alto rendimiento" (HKCU\...\DirectX\UserGpuPreferences, GpuPreference=2) para la ruta EXACTA del RobloxPlayerBeta.exe actual, y volver a crearla cuando Roblox se actualice (el Booster lo detecta al abrir el juego).' `
         $(if ($onIgpu) { 'MUY ALTO: la 920MX rinde bastante mas que la grafica integrada.' } else { 'Ninguno si ya usa la NVIDIA; evita que una actualizacion lo rompa.' }) `
@@ -71,8 +78,9 @@ function Get-OptimizationPlan {
     # 4. Prioridad de Roblox ----------------------------------------------------
     $bg = if ($m.BackgroundCpu) { $m.BackgroundCpu.Avg } else { $null }
     $st = if (-not $game) { 'PENDIENTE' } elseif (($bg -ge 8) -or $cpuBound) { 'RECOMENDADA' } else { 'OPCIONAL' }
+    $lasso = @($Static.OtherTools) -match 'ProcessLasso|ProcessGovernor'
     [void]$plan.Add((New-Opt 'PRIORITY' 'Prioridad "Por encima de lo normal" para Roblox' $st `
-        "CPU usada por otros procesos durante el juego: $(Format-N $bg)%. Prioridad actual de Roblox: $(if ($Static.Roblox.Running) { ($Static.Roblox.Running | Select-Object -First 1).PriorityClass } else { 'n/d' })." `
+        "CPU usada por otros procesos durante el juego: $(Format-N $bg)%. Prioridad actual de Roblox: $(if ($Static.Roblox.Running) { ($Static.Roblox.Running | Select-Object -First 1).PriorityClass } else { 'n/d' }).$(if ($lasso) { ' Process Lasso esta abierto: puede estar bajando la prioridad de Roblox por su cuenta; hay que revisarlo para que no se peleen.' })" `
         'Cambiar la clase de prioridad del proceso (lo mismo que hace el Administrador de tareas). No se usa "Alta" ni "Tiempo real" porque pueden dejar sin CPU al audio, raton o al propio Windows. No toca archivos ni memoria de Roblox.' `
         'Bajo-medio: solo ayuda cuando hay competencia real por la CPU.' 'Fase 5 (CPU Boost)' 'La prioridad vuelve a Normal y desaparece al cerrar Roblox.'))
 
@@ -123,6 +131,14 @@ function Get-OptimizationPlan {
         $(if ($thermal) { 'Hay limitacion termica: un overclock produciria mas calor y la GPU bajaria aun mas sus relojes.' } else { 'No se asume que sea compatible. En la fase 9 se comprobara via NVAPI si tu driver permite desplazamientos de reloj en esta GPU movil (muchos portatiles lo bloquean).' }) `
         'Solo desplazamiento de reloj (sin voltaje, sin BIOS ni firmware), en pasos pequenos, con prueba de estabilidad, medicion y reversion automatica.' `
         'Si esta disponible y la GPU es el limite: tipicamente +5-12% en GPU, nunca garantizado.' 'Fase 9 (solo si es compatible)' 'Reversion automatica a 0 MHz de desplazamiento; nada persiste tras reiniciar.'))
+
+    # 11b. Turbo de CPU ----------------------------------------------------------
+    $tb = $Static.Turbo
+    $noTurbo = (@($Analysis.Findings | Where-Object { $_.Title -match 'turbo' }).Count -gt 0) -or ($tb -and $tb.MaxPerfPct -lt 105)
+    [void]$plan.Add((New-Opt 'TURBO' 'Recuperar el turbo de la CPU' $(if ($noTurbo) { 'PENDIENTE' } elseif ($tb) { 'YA CORRECTO' } else { 'PENDIENTE' }) `
+        $(if ($noTurbo) { "Medido: la CPU no sube de su frecuencia base$(if ($tb) { " (maximo $($tb.MaxMHz) MHz en la prueba)" }). Con un juego limitado por CPU, es lo que mas FPS puede devolver." } elseif ($tb) { "La CPU llego a $($tb.MaxMHz) MHz en la prueba: el turbo funciona." } else { 'No se hizo la prueba de turbo.' }) `
+        'Primero averiguar POR QUE esta bloqueado (modo de energia de Lenovo Vantage, driver termico Intel DPTF, opcion de BIOS o temperatura). Solo se cambiaria un ajuste de Windows/Lenovo reversible; nunca la BIOS.' `
+        'Potencialmente alto en limitacion por CPU (el i7-7500U puede pasar de 2,7 a 3,5 GHz en un nucleo).' 'Fase 5 (CPU Boost), tras investigar la causa' 'Se restaura el ajuste original.'))
 
     # 12. Termico -----------------------------------------------------------------
     [void]$plan.Add((New-Opt 'THERMAL' 'Gestion termica: reducir turbo de CPU si el calor limita a la GPU' $(if ($thermal -and $gpuBound) { 'RECOMENDADA' } elseif ($thermal) { 'OPCIONAL' } else { 'NO RECOMENDADA' }) `

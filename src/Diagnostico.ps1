@@ -27,7 +27,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$ToolVersion = '0.1.0-fase1'
+$ToolVersion = '0.2.0-fase1'
 $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'lib/Analysis.ps1')
 . (Join-Path $PSScriptRoot 'lib/Collectors.ps1')
@@ -80,6 +80,21 @@ if ($nvSmi) {
 }
 $nvFields = @()
 if ($nvSmi) { $nvFields = (Get-NvFields -Exe $nvSmi -Fields $script:NvSampleFields).Supported }
+
+# Adaptadores segun DirectX: identifica sin dudas cual es la NVIDIA.
+$dxgi = @(Get-DxgiAdapters)
+$static | Add-Member -NotePropertyName Dxgi -NotePropertyValue $dxgi -Force
+$script:SampleState.DxgiNvLuids = @($dxgi | Where-Object { $_.IsNvidia } | ForEach-Object { $_.Luid })
+foreach ($a in $dxgi) { Write-Ok "DirectX: $($a.Name) (LUID $($a.Luid))" }
+
+# Prueba corta de turbo (con el juego cerrado, para que sea limpia).
+$turbo = $null
+if ((Test-IsWindows) -and @(Get-RobloxProcesses).Count -eq 0) {
+    Write-Step 'Prueba de turbo de la CPU (8 s, solo carga de calculo)...'
+    $turbo = Test-CpuTurbo -Seconds 8
+    if ($turbo) { Write-Ok "Frecuencia maxima alcanzada: $($turbo.MaxMHz) MHz ($($turbo.MaxPerfPct)% de la base de Windows)" }
+}
+$static | Add-Member -NotePropertyName Turbo -NotePropertyValue $turbo -Force
 
 # --------------------------------------------------------------- 2. PresentMon
 $pmExe = Find-PresentMon -ToolsDir $ToolsDir
@@ -153,6 +168,9 @@ Write-Host ''
 $elapsed = ((Get-Date) - $tStart).TotalSeconds
 $procAfter = Get-ProcSnapshot
 $nvRobloxLines = Get-NvidiaSmiProcessLines -Exe $nvSmi | Where-Object { $_ -match 'Roblox' }
+# Estado del driver NVIDIA con el juego abierto (temperaturas, relojes, rendimiento).
+$nvLive = @()
+if ($nvSmi) { try { $nvLive = @(& $nvSmi -q -d TEMPERATURE,CLOCK,PERFORMANCE,UTILIZATION 2>$null) } catch {} }
 $static.Roblox = Get-RobloxInfo   # refrescar (proceso en ejecucion)
 try { [Console]::Beep(880, 300); [Console]::Beep(1100, 300) } catch {}
 
@@ -176,13 +194,18 @@ $ctx = [pscustomobject]@{
     ProcThrottleMaxAC = $(if ($static.Power.ProcThrottleMax) { $static.Power.ProcThrottleMax.AC } else { $null })
     PowerOverlayName  = $static.Power.OverlayAC
     RefreshHz         = [int]$static.RefreshHz
+    TurboMaxPerfPct   = $(if ($turbo) { $turbo.MaxPerfPct } else { $null })
 }
+# Otros optimizadores que pueden cambiar prioridades o relojes por su cuenta.
+$otherTools = @(Get-Process -Name 'ProcessLasso', 'ProcessGovernor', 'MSIAfterburner', 'RTSS', 'Razer Cortex', 'WiseGameBooster' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)
+$static | Add-Member -NotePropertyName OtherTools -NotePropertyValue $otherTools -Force
 $analysis = Invoke-BottleneckAnalysis -Samples $samples -Frames $frames -Context $ctx
 $plan = Get-OptimizationPlan -Static $static -Analysis $analysis -ProcUsage $procUsage
 
 $meta = [pscustomobject]@{
     Date = (Get-Date).ToString('yyyy-MM-dd HH:mm'); ToolVersion = $ToolVersion; IsAdmin = $isAdmin
     CaptureSeconds = [math]::Round($elapsed); FpsSource = $fpsSource; NvSmiRobloxLines = @($nvRobloxLines)
+    NvLive = @($nvLive); GpuIdent = $script:GpuIdent
 }
 # ---------------------------------------------------------------- 5. Guardado
 # Primero los datos en bruto: si algo falla despues, la medicion no se pierde.

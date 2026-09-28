@@ -33,6 +33,10 @@ Assert ((Get-NvThrottleText 0x24) -match 'energia' -and (Get-NvThrottleText 0x24
 $st = Get-Stats @(1, 2, 3, 4, $null, 5)
 Assert ($st.Count -eq 5 -and $st.Avg -eq 3 -and $st.P50 -eq 3 -and $st.Max -eq 5) 'Estadisticas ignoran nulos'
 Assert ((ConvertTo-Num '[N/A]') -eq $null -and (ConvertTo-Num '65.5') -eq 65.5) 'Conversion de valores nvidia-smi'
+Assert ((ConvertTo-Num '582,66') -eq 582.66) 'Coma decimal de Windows en espanol (582,66)'
+Assert ((@('582,66, 0, 993' -split ', ')).Count -eq 3) 'Separar campos sin romper la coma decimal'
+$dxgiOk = $true; try { if (-not ('GbDxgi' -as [type])) { Add-Type -TypeDefinition $script:DxgiSource -ErrorAction Stop } } catch { $dxgiOk = $false; Write-Host $_ }
+Assert $dxgiOk 'El codigo de consulta a DirectX compila'
 Assert ((Get-GpuMemoryTypeGuess 900) -match 'DDR3' -and (Get-GpuMemoryTypeGuess 2505) -match 'GDDR5') 'Tipo de VRAM por reloj'
 Assert (Test-IsMaxwellOrOlder 'NVIDIA GeForce 920MX') 'La 920MX se reconoce como Maxwell'
 Assert (-not (Test-IsMaxwellOrOlder 'NVIDIA GeForce GTX 1650')) 'GTX 1650 no es Maxwell'
@@ -76,6 +80,18 @@ $gpuFt = @(1..600 | ForEach-Object { 22 + ($_ % 7) })
 $a = Invoke-BottleneckAnalysis -Samples (New-Samples -Set @{ GpuUtil = 97 }) -Frames (Get-FrameStats -FrameTimesMs $gpuFt -GpuBusyMs @($gpuFt | ForEach-Object { $_ * 0.97 })) -Context $ctx
 Assert ($a.Verdict -eq 'GPU BOTTLENECK' -and -not $a.FpsCap) "PresentMon GPU ocupada 97% del fotograma => $($a.Verdict)"
 
+# Caso real del primer informe: motores 3D de Roblox en la integrada pero 1 GB de VRAM en la NVIDIA.
+$a = Invoke-BottleneckAnalysis -Samples (New-Samples -Set @{ RobloxGpuNvidia = 0; RobloxGpuOther = 37; RobloxNvDedicatedMB = 1000 }) -Frames $null -Context $ctx
+Assert ($a.Verdict -notmatch 'INTEGRADA' -and @($a.Findings | Where-Object { $_.Title -match 'contradicen' }).Count -eq 1) "Datos contradictorios => no se afirma iGPU ($($a.Verdict))"
+$a = Invoke-BottleneckAnalysis -Samples (New-Samples -Set @{ RobloxGpuNvidia = 0; RobloxGpuOther = 37; RobloxNvDedicatedMB = 5 }) -Frames $null -Context $ctx
+Assert ($a.Verdict -match 'INTEGRADA') 'iGPU con memoria casi nula en NVIDIA => iGPU'
+
+$ctxNoTurbo = [pscustomobject]@{ GpuMaxClockMHz = 993; ProcThrottleMaxAC = 100; PowerOverlayName = 'Equilibrado (recomendado)'; RefreshHz = 60; TurboMaxPerfPct = 93 }
+$a = Invoke-BottleneckAnalysis -Samples (New-Samples -Set @{ GpuUtil = 40; CpuCoreMax = 95; RobloxTopThreadPct = 92; CpuPerfPct = 93 }) -Frames $null -Context $ctxNoTurbo
+Assert (@($a.Findings | Where-Object { $_.Title -match 'turbo' }).Count -eq 1) 'CPU sin turbo (93%) => se detecta'
+$a = Invoke-BottleneckAnalysis -Samples (New-Samples -Set @{ CpuPerfPct = 120 }) -Frames $null -Context ([pscustomobject]@{ RefreshHz = 60; TurboMaxPerfPct = 121 })
+Assert (@($a.Findings | Where-Object { $_.Title -match 'turbo' }).Count -eq 0) 'CPU con turbo (121%) => sin aviso'
+
 $a = Invoke-BottleneckAnalysis -Samples (New-Samples -Set @{ RobloxRunning = $false }) -Frames $null -Context $ctx
 Assert ($a.Verdict -eq 'SIN DATOS DE JUEGO') 'Sin Roblox => sin veredicto'
 
@@ -90,6 +106,9 @@ $static = [pscustomobject]@{
     Graphics = [pscustomobject]@{ HistoricalCapture = 1; GameModeAuto = $null; HagsHwSchMode = $null }
     Roblox = [pscustomobject]@{ Installs = @([pscustomobject]@{ Path = 'C:\x\RobloxPlayerBeta.exe' }); GpuPreferences = @(); Running = @(); Settings = [ordered]@{ GraphicsQualityLevel = '7' }; SettingsFile = 'C:\x\GlobalBasicSettings_13.xml' }
     Machine = [pscustomobject]@{}; OS = [pscustomobject]@{}; PageFile = @(); Disks = @(); StartupItems = @(); RefreshHz = 60
+    Turbo = [pscustomobject]@{ MaxPerfPct = 93; MaxMHz = 2697; WindowsBaseMHz = 2901; LimitFlagsMax = 1 }
+    Dxgi = @([pscustomobject]@{ Name = 'NVIDIA GeForce 920MX'; VendorId = '0x10DE'; IsNvidia = $true; Luid = '0x00000000_0x0000D1C3'; DedicatedMB = 2048; SharedMB = 6000; Software = $false })
+    OtherTools = @('ProcessLasso')
 }
 $a = Invoke-BottleneckAnalysis -Samples (New-Samples -Set @{ GpuUtil = 62; CpuCoreMax = 98; RobloxTopThreadPct = 97 }) -Frames $fsCap -Context $ctx
 $procs = @([pscustomobject]@{ Name = 'chrome'; Count = 12; CpuPct = 6.5; PrivateMB = 900; WorkingSetMB = 1000; Critical = $false; KnownBackground = $true },
@@ -104,11 +123,16 @@ Assert ($byId['FPS_CAP'].State -eq 'RECOMENDADA') 'Limite de FPS detectado'
 Assert ($byId['GPU_SELECT'].State -eq 'OPCIONAL') 'Roblox ya en NVIDIA sin preferencia => opcional'
 Assert ($byId['DRIVER'].State -eq 'RECOMENDADA') 'Driver de hace 30 meses => actualizar'
 
-$meta = [pscustomobject]@{ Date = 'hoy'; ToolVersion = 'test'; IsAdmin = $true; CaptureSeconds = 90; FpsSource = 'test'; NvSmiRobloxLines = @('|    0   N/A  N/A      8123    C+G   ...\RobloxPlayerBeta.exe      N/A      |') }
+$gi = @{ '0x00000000_0x0000D1C3|3D' = [System.Collections.Generic.List[double]]@(40, 50); '0x00000000_0x0000D1C3|MemoriaDedicadaMB' = [System.Collections.Generic.List[double]]@(1000, 1100) }
+$meta = [pscustomobject]@{ Date = 'hoy'; ToolVersion = 'test'; IsAdmin = $true; CaptureSeconds = 90; FpsSource = 'test'; GpuIdent = $gi; NvLive = @('    Temperature', '        GPU Current Temp : N/A'); NvSmiRobloxLines = @('|    0   N/A  N/A      8123    C+G   ...\RobloxPlayerBeta.exe      N/A      |') }
 $txt = Build-TextReport -Static $static -Analysis $a -Plan $plan -ProcUsage $procs -Meta $meta
 Assert ($txt -match 'RESPUESTAS A TUS 10 PREGUNTAS' -and $txt -match '920MX' -and $txt -match 'DDR3') 'El informe se genera'
 Assert ($txt -match '8\. La CPU como cuello de botella: SI') 'Pregunta 8 responde SI en caso CPU'
-Assert ($txt -match 'nvidia-smi: .*RobloxPlayerBeta') 'El informe incluye las lineas de nvidia-smi con Roblox'
+Assert ($txt -match 'nvidia-smi.*RobloxPlayerBeta') 'El informe incluye las lineas de nvidia-smi con Roblox'
+Assert ($txt -match 'IDENTIFICACION DE GPU' -and $txt -match 'MemoriaDedicadaMB' -and $txt -match '= NVIDIA') 'Seccion de identificacion de GPU'
+Assert ($txt -match 'Prueba de turbo' -and $txt -match 'GPU Current Temp') 'Turbo y datos del driver en el informe'
+Assert ($byId['PRIORITY'].Why -match 'Process Lasso') 'Se avisa de Process Lasso'
+Assert ($byId['TURBO'].State -eq 'PENDIENTE') 'Turbo bloqueado => investigar'
 
 Write-Host 'Codigo'
 # Windows PowerShell no distingue mayusculas en variables: $L y $l son la misma.

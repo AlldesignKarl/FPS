@@ -36,6 +36,8 @@ function ConvertTo-Num {
     if ($null -eq $v) { return $null }
     $s = "$v".Trim()
     if ($s -eq '' -or $s -match '^\[.*\]$' -or $s -eq 'N/A') { return $null }
+    # nvidia-smi usa el separador decimal de Windows: en espanol escribe "582,66".
+    if ($s -match '^-?\d+,\d+$') { $s = $s.Replace(',', '.') }
     $d = 0.0
     if ([double]::TryParse($s, [Globalization.NumberStyles]::Float, $script:Inv, [ref]$d)) { return $d }
     return $s
@@ -62,7 +64,8 @@ function Invoke-NvQuery {
     if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
     $line = "$(@($out)[0])"
     if ($line -match 'not a valid field|Invalid combination|error' ) { return $null }
-    $parts = $line -split ',\s*'
+    # Los campos van separados por ", "; una coma decimal nunca lleva espacio detras.
+    $parts = $line -split ', '
     if ($parts.Count -ne $Fields.Count) { return $null }
     $r = [ordered]@{}
     for ($i = 0; $i -lt $Fields.Count; $i++) { $r[$Fields[$i]] = ConvertTo-Num $parts[$i] }
@@ -91,7 +94,7 @@ $script:NvStaticFields = @(
     'temperature.gpu', 'pstate', 'display_mode', 'display_active', 'driver_model.current'
 )
 $script:NvSampleFields = @(
-    'utilization.gpu', 'utilization.memory', 'temperature.gpu', 'clocks.graphics', 'clocks.memory',
+    'utilization.gpu', 'utilization.memory', 'temperature.gpu', 'clocks.current.graphics', 'clocks.current.memory',
     'memory.used', 'memory.total', 'pstate', 'power.draw', 'clocks_throttle_reasons.active', 'clocks_event_reasons.active'
 )
 
@@ -403,7 +406,8 @@ function Get-ThreadTimes {
 }
 
 # Estado persistente entre muestras (tiempos previos de CPU).
-$script:SampleState = @{ PrevRoblox = @{}; PrevThreads = @{}; PrevTime = $null }
+$script:SampleState = @{ PrevRoblox = @{}; PrevThreads = @{}; PrevTime = $null; NvLuids = @(); DxgiNvLuids = @() }
+$script:GpuIdent = @{}
 
 function Get-LiveSample {
     param([string]$NvSmi, [string[]]$NvFields, [int]$LogicalCpus, [double]$TotalRamMB)
@@ -453,9 +457,10 @@ function Get-LiveSample {
         if ($nv) {
             $s.GpuUtil        = $nv['utilization.gpu']
             $s.GpuMemCtrlUtil = $nv['utilization.memory']
-            $s.GpuTempC       = $nv['temperature.gpu']
-            $s.GpuClockMHz    = $nv['clocks.graphics']
-            $s.GpuMemClockMHz = $nv['clocks.memory']
+            # 0 C no es una lectura real: el driver devuelve 0 cuando no tiene el sensor.
+            $s.GpuTempC       = $(if ($nv['temperature.gpu'] -gt 0) { $nv['temperature.gpu'] } else { $null })
+            $s.GpuClockMHz    = $nv['clocks.current.graphics']
+            $s.GpuMemClockMHz = $nv['clocks.current.memory']
             $s.VramUsedMB     = $nv['memory.used']
             $s.VramTotalMB    = $nv['memory.total']
             $s.GpuPState      = $nv['pstate']
@@ -477,10 +482,15 @@ function Get-LiveSample {
             }
         }
         $parsed = @($parsed)
-        # La NVIDIA expone motores propios (Cuda, VR, Graphics_1) que Intel/AMD no tienen.
-        $nvLuids = @($parsed | Where-Object { $_.Type -match '^(Cuda|VR|Graphics_1)$' } | Select-Object -ExpandProperty Luid -Unique)
-        $script:SampleState.NvLuids = @(@($script:SampleState.NvLuids) + $nvLuids | Where-Object { $_ } | Select-Object -Unique)
-        $known = $script:SampleState.NvLuids
+        if (@($script:SampleState.DxgiNvLuids).Count) {
+            # Identificacion exacta: LUID de la NVIDIA segun DirectX (fabricante 0x10DE).
+            $known = @($script:SampleState.DxgiNvLuids)
+        } else {
+            # Alternativa: la NVIDIA expone motores propios (Cuda, VR, Graphics_1) que Intel no tiene.
+            $nvLuids = @($parsed | Where-Object { $_.Type -match '^(Cuda|VR|Graphics_1)$' } | Select-Object -ExpandProperty Luid -Unique)
+            $script:SampleState.NvLuids = @(@($script:SampleState.NvLuids) + $nvLuids | Where-Object { $_ } | Select-Object -Unique)
+            $known = $script:SampleState.NvLuids
+        }
         # Uso 3D por adaptador (maximo entre motores, sumando procesos)
         $byEngine = $parsed | Group-Object Luid, Eng | ForEach-Object {
             [pscustomobject]@{ Luid = $_.Group[0].Luid; Util = ($_.Group | Measure-Object Util -Sum).Sum }
@@ -494,6 +504,34 @@ function Get-LiveSample {
             $s.RobloxGpuNvidia = [math]::Round((@($rb | Where-Object { $known -contains $_.Luid }) | Measure-Object Util -Sum).Sum, 1)
             $s.RobloxGpuOther  = [math]::Round((@($rb | Where-Object { $known -notcontains $_.Luid }) | Measure-Object Util -Sum).Sum, 1)
             $s.RobloxHasNvContext = @($rb | Where-Object { $known -contains $_.Luid }).Count -gt 0
+            # Acumulado por adaptador y tipo de motor, para la seccion "Identificacion de GPU" del informe.
+            foreach ($grp in ($rb | Group-Object Luid, Type)) {
+                $key = "$($grp.Group[0].Luid)|$($grp.Group[0].Type)"
+                if (-not $script:GpuIdent.ContainsKey($key)) { $script:GpuIdent[$key] = New-Object System.Collections.Generic.List[double] }
+                $script:GpuIdent[$key].Add(($grp.Group | Measure-Object Util -Sum).Sum)
+            }
+        }
+    }
+
+    # --- Memoria de GPU usada por Roblox en cada adaptador (quien tiene sus texturas)
+    if ($robloxIds.Count) {
+        $pm = @(Get-Cim Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory)
+        $nvDed = 0.0; $otDed = 0.0; $shared = 0.0; $any = $false
+        foreach ($m in $pm) {
+            if ($m.Name -match 'pid_(\d+)_luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+)_phys' -and $robloxIds -contains [int]$Matches[1]) {
+                $any = $true
+                $ded = [double]$m.DedicatedUsage / 1MB
+                if (@($script:SampleState.DxgiNvLuids + $script:SampleState.NvLuids) -contains $Matches[2]) { $nvDed += $ded } else { $otDed += $ded }
+                $shared += [double]$m.SharedUsage / 1MB
+                $key = "$($Matches[2])|MemoriaDedicadaMB"
+                if (-not $script:GpuIdent.ContainsKey($key)) { $script:GpuIdent[$key] = New-Object System.Collections.Generic.List[double] }
+                $script:GpuIdent[$key].Add($ded)
+            }
+        }
+        if ($any) {
+            $s.RobloxNvDedicatedMB    = [math]::Round($nvDed)
+            $s.RobloxOtherDedicatedMB = [math]::Round($otDed)
+            $s.RobloxSharedMB         = [math]::Round($shared)
         }
     }
     if ($null -eq $s.GpuUtil -and $null -ne $s.GpuUtilWin) { $s.GpuUtil = $s.GpuUtilWin }
@@ -530,6 +568,101 @@ function Get-LiveSample {
     $script:SampleState.PrevThreads = $newTh
     $script:SampleState.PrevTime = $now
     return [pscustomobject]$s
+}
+
+# ------------------------------------------------------------------- DXGI
+# Lista los adaptadores tal como los ve DirectX, con su LUID: es la forma exacta
+# de saber que LUID de los contadores de Windows corresponde a la NVIDIA.
+$script:DxgiSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class GbDxgi {
+    [DllImport("dxgi.dll")] static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int EnumAdapters1Fn(IntPtr self, uint index, out IntPtr adapter);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetDesc1Fn(IntPtr self, out Desc1 desc);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate uint ReleaseFn(IntPtr self);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct Desc1 {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Description;
+        public uint VendorId; public uint DeviceId; public uint SubSysId; public uint Revision;
+        public UIntPtr DedicatedVideoMemory; public UIntPtr DedicatedSystemMemory; public UIntPtr SharedSystemMemory;
+        public uint LuidLow; public int LuidHigh; public uint Flags;
+    }
+    static T Fn<T>(IntPtr obj, int slot) where T : class {
+        IntPtr vtbl = Marshal.ReadIntPtr(obj);
+        IntPtr p = Marshal.ReadIntPtr(vtbl, slot * IntPtr.Size);
+        return Marshal.GetDelegateForFunctionPointer(p, typeof(T)) as T;
+    }
+    public static Desc1[] List() {
+        Guid iid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387"); // IDXGIFactory1
+        IntPtr f;
+        int hr = CreateDXGIFactory1(ref iid, out f);
+        if (hr != 0) { throw new COMException("CreateDXGIFactory1", hr); }
+        List<Desc1> list = new List<Desc1>();
+        try {
+            EnumAdapters1Fn enumFn = Fn<EnumAdapters1Fn>(f, 12);   // IDXGIFactory1::EnumAdapters1
+            for (uint i = 0; i < 16; i++) {
+                IntPtr a;
+                if (enumFn(f, i, out a) != 0) { break; }            // DXGI_ERROR_NOT_FOUND
+                try {
+                    Desc1 d;
+                    if (Fn<GetDesc1Fn>(a, 10)(a, out d) == 0) { list.Add(d); }   // IDXGIAdapter1::GetDesc1
+                } finally { Fn<ReleaseFn>(a, 2)(a); }
+            }
+        } finally { Fn<ReleaseFn>(f, 2)(f); }
+        return list.ToArray();
+    }
+}
+'@
+
+function Get-DxgiAdapters {
+    try {
+        if (-not ('GbDxgi' -as [type])) { Add-Type -TypeDefinition $script:DxgiSource -ErrorAction Stop }
+        return @([GbDxgi]::List() | ForEach-Object {
+            [pscustomobject]@{
+                Name = $_.Description; VendorId = ('0x{0:X4}' -f $_.VendorId); IsNvidia = ($_.VendorId -eq 0x10DE)
+                Luid = ('0x{0:X8}_0x{1:X8}' -f [uint32]$_.LuidHigh, $_.LuidLow)
+                DedicatedMB = [math]::Round([double]$_.DedicatedVideoMemory.ToUInt64() / 1MB)
+                SharedMB = [math]::Round([double]$_.SharedSystemMemory.ToUInt64() / 1MB)
+                Software = (($_.Flags -band 2) -ne 0)
+            }
+        })
+    } catch { return @() }
+}
+
+# ------------------------------------------------------------- Prueba de turbo
+# Carga UN hilo durante unos segundos y mira hasta donde sube la frecuencia.
+# Es solo carga de calculo (como abrir una web pesada): no cambia ningun ajuste.
+function Test-CpuTurbo {
+    param([int]$Seconds = 8)
+    if (-not (Test-IsWindows)) { return $null }
+    $job = Start-Job -ArgumentList $Seconds -ScriptBlock {
+        param($sec)
+        $sw = [Diagnostics.Stopwatch]::StartNew(); $x = 0
+        while ($sw.Elapsed.TotalSeconds -lt $sec) { $x++ }
+    }
+    Start-Sleep -Milliseconds 1500
+    $maxPerf = 0.0; $base = $null; $flags = @(); $n = 0
+    $end = (Get-Date).AddSeconds($Seconds - 2)
+    while ((Get-Date) -lt $end) {
+        foreach ($c in (Get-Cim Win32_PerfFormattedData_Counters_ProcessorInformation)) {
+            if ($c.Name -match '^\d+,\d+$|^_Total$') {
+                if ([double]$c.PercentProcessorPerformance -gt $maxPerf) { $maxPerf = [double]$c.PercentProcessorPerformance }
+                if ($c.ProcessorFrequency) { $base = [double]$c.ProcessorFrequency }
+                if ($c.Name -eq '_Total') { $flags += [double]$c.PerformanceLimitFlags }
+            }
+        }
+        $n++
+        Start-Sleep -Milliseconds 700
+    }
+    Wait-Job $job -Timeout 10 | Out-Null
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    return [pscustomobject]@{
+        Samples = $n; MaxPerfPct = $maxPerf; WindowsBaseMHz = $base
+        MaxMHz = $(if ($base) { [math]::Round($base * $maxPerf / 100) } else { $null })
+        LimitFlagsMax = $(if ($flags.Count) { ($flags | Measure-Object -Maximum).Maximum } else { $null })
+    }
 }
 
 # ------------------------------------------------------------- PresentMon

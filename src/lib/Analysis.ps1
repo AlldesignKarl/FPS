@@ -197,19 +197,21 @@ function Invoke-BottleneckAnalysis {
         BackgroundCpu   = Get-Stats ($S | ForEach-Object { if ($null -ne $_.CpuTotal -and $null -ne $_.RobloxCpuPct) { [math]::Max(0, $_.CpuTotal - $_.RobloxCpuPct) } })
         RobloxGpuNv     = Get-Stats ($S | ForEach-Object { $_.RobloxGpuNvidia })
         RobloxGpuOther  = Get-Stats ($S | ForEach-Object { $_.RobloxGpuOther })
+        RobloxNvDedMB   = Get-Stats ($S | ForEach-Object { $_.RobloxNvDedicatedMB })
+        RobloxOtherDedMB= Get-Stats ($S | ForEach-Object { $_.RobloxOtherDedicatedMB })
+        CpuLimitFlags   = Get-Stats ($S | ForEach-Object { $_.CpuLimitFlags })
     }
     $vramTotal = ($S | Where-Object { $_.VramTotalMB } | Select-Object -First 1).VramTotalMB
     $gpuMaxClock = $Context.GpuMaxClockMHz
 
     # ---------------- Seleccion de GPU ----------------
-    if ($useGame) {
-        $nv = if ($m.RobloxGpuNv) { $m.RobloxGpuNv.Avg } else { $null }
-        $ot = if ($m.RobloxGpuOther) { $m.RobloxGpuOther.Avg } else { $null }
-        if ($null -ne $ot -and $ot -gt 5 -and ($null -eq $nv -or $nv -lt 1)) {
-            [void]$findings.Add((New-Finding 'OTRO' 95 'Roblox esta renderizando con la GPU INTEGRADA, no con la 920MX' @(
-                "Uso 3D de Roblox en GPU integrada: $(Format-N $ot)% ; en NVIDIA: $(Format-N $nv)%") `
-                'Es la causa mas grave posible: la 920MX no se esta usando para el juego. Forzar la GPU de alto rendimiento para RobloxPlayerBeta.exe es la primera optimizacion.'))
-        }
+    $gsel = Get-RobloxGpuVerdict -Metrics ([pscustomobject]$m) -UsedGameData $useGame
+    if ($gsel.Code -eq 'IGPU') {
+        [void]$findings.Add((New-Finding 'OTRO' 95 'Roblox esta renderizando con la GPU INTEGRADA, no con la 920MX' $gsel.Evidence `
+            'Es la causa mas grave posible: la 920MX no se esta usando para el juego. Forzar la GPU de alto rendimiento para Roblox es la primera optimizacion.'))
+    } elseif ($gsel.Code -eq 'DUDA') {
+        [void]$findings.Add((New-Finding 'OTRO' 35 'No esta claro que grafica usa Roblox: los datos se contradicen' $gsel.Evidence `
+            'Hace falta otra medicion antes de cambiar nada relacionado con la seleccion de GPU.'))
     }
 
     # Un limite de FPS (cap/VSync) hace que CPU y GPU esperen: en ese caso la
@@ -342,6 +344,19 @@ function Invoke-BottleneckAnalysis {
             'Con bateria o con un plan de ahorro, Windows y el driver limitan frecuencias de CPU y GPU. Con el cargador y un plan de alto rendimiento la CPU/GPU pueden mantener su frecuencia maxima.'))
     }
 
+    # ---------------- Turbo de la CPU ----------------
+    $turboPct = $Context.TurboMaxPerfPct
+    $gamePerfMax = if ($m.CpuPerfPct) { $m.CpuPerfPct.Max } else { $null }
+    if (($null -ne $turboPct -and $turboPct -lt 105) -or ($null -eq $turboPct -and $useGame -and $null -ne $gamePerfMax -and $gamePerfMax -lt 100 -and $m.CpuCoreMax -and $m.CpuCoreMax.P50 -ge 80)) {
+        $ev = @()
+        if ($null -ne $turboPct) { $ev += "Prueba con un hilo al 100%: la CPU no paso del $(Format-N $turboPct)% de la frecuencia base de Windows" }
+        if ($null -ne $gamePerfMax) { $ev += "Durante el juego: maximo $(Format-N $gamePerfMax)% ($(Format-N $m.CpuMHz.Max) MHz)" }
+        if ($m.CpuLimitFlags -and $m.CpuLimitFlags.Max -gt 0) { $ev += "Windows marca limite de rendimiento activo (flags $(Format-N $m.CpuLimitFlags.Max))" }
+        $cpuLimited = @($findings | Where-Object { $_.Type -eq 'CPU' -and $_.Score -ge 40 }).Count -gt 0
+        [void]$findings.Add((New-Finding 'POWER' $(if ($cpuLimited) { 65 } else { 45 }) 'La CPU no usa su turbo (se queda en la frecuencia base)' $ev `
+            'El turbo permite a la CPU subir por encima de su frecuencia base cuando hay margen. Si esta bloqueado (modo de energia del fabricante, driver termico de Intel, BIOS o calor), el hilo principal de Roblox va mas lento. Hay que averiguar la causa antes de tocar nada.'))
+    }
+
     # ---------------- RAM ----------------
     $ramScore = 0; $ramEv = @()
     if ($m.RamUsedPct) {
@@ -400,4 +415,25 @@ function Invoke-BottleneckAnalysis {
         Frames       = $Frames
         FpsCap       = $cap
     }
+}
+
+# Decide que grafica usa Roblox combinando varias pruebas independientes:
+# uso de motores 3D por adaptador y memoria de GPU de Roblox en cada adaptador.
+function Get-RobloxGpuVerdict {
+    param($Metrics, [bool]$UsedGameData)
+    $m = $Metrics
+    if (-not $UsedGameData) { return [pscustomobject]@{ Code = 'SIN_DATOS'; Evidence = @('Roblox no estaba abierto') } }
+    $nvUtil = if ($m.RobloxGpuNv) { $m.RobloxGpuNv.Avg } else { $null }
+    $otUtil = if ($m.RobloxGpuOther) { $m.RobloxGpuOther.Avg } else { $null }
+    $nvDed  = if ($m.RobloxNvDedMB) { $m.RobloxNvDedMB.P50 } else { $null }
+    $ev = @("Uso 3D de Roblox: NVIDIA $(Format-N $nvUtil)% / integrada $(Format-N $otUtil)%")
+    if ($null -ne $nvDed) { $ev += "Memoria de video de Roblox en la NVIDIA: $(Format-N $nvDed) MB" }
+    $memOnNv  = ($null -ne $nvDed -and $nvDed -ge 150)
+    $utilOnNv = ($null -ne $nvUtil -and $nvUtil -ge 1)
+    $utilOnIg = ($null -ne $otUtil -and $otUtil -gt 5)
+    if ($utilOnNv) { return [pscustomobject]@{ Code = 'NVIDIA'; Evidence = $ev } }
+    if ($utilOnIg -and $memOnNv) { return [pscustomobject]@{ Code = 'DUDA'; Evidence = $ev } }
+    if ($utilOnIg) { return [pscustomobject]@{ Code = 'IGPU'; Evidence = $ev } }
+    if ($memOnNv) { return [pscustomobject]@{ Code = 'NVIDIA'; Evidence = $ev } }
+    return [pscustomobject]@{ Code = 'DESCONOCIDO'; Evidence = $ev }
 }
