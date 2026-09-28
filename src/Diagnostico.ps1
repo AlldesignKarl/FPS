@@ -34,6 +34,12 @@ $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'lib/Plan.ps1')
 . (Join-Path $PSScriptRoot 'lib/Report.ps1')
 
+# Pedir administrador si hace falta (PresentMon lo necesita para medir FPS).
+if ((Test-IsWindows) -and -not (Test-IsAdmin) -and -not $NoPrompt) {
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    exit
+}
+
 function Write-Step([string]$t) { Write-Host "  > $t" -ForegroundColor Cyan }
 function Write-Ok([string]$t)   { Write-Host "    $t" -ForegroundColor Gray }
 function Write-Warn2([string]$t){ Write-Host "    ! $t" -ForegroundColor Yellow }

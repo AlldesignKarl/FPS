@@ -4,7 +4,7 @@
 #    irm https://raw.githubusercontent.com/AlldesignKarl/FPS/refs/heads/claude/magical-hopper-b7gkdd/instalar.ps1 | iex
 #
 #  Descarga la ultima version a %LOCALAPPDATA%\GpuBooster920MX (sin tocar nada
-#  mas del sistema) y abre el diagnostico con permisos de administrador.
+#  mas del sistema), crea accesos directos en el escritorio y abre el Booster.
 # =============================================================================
 # Todo va dentro de un bloque para no cambiar nada de la sesion de PowerShell del usuario.
 & {
@@ -33,9 +33,28 @@ try {
     Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host "  Instalado en: $dest" -ForegroundColor Gray
-    Write-Host '  Abriendo el diagnostico (Windows pedira permiso: pulsa SI)...' -ForegroundColor Green
-    $diag = Join-Path $dest 'src\Diagnostico.ps1'
-    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$diag`"")
+
+    # Accesos directos en el escritorio (no hara falta volver a pegar nada).
+    $ws = New-Object -ComObject WScript.Shell
+    $desk = [Environment]::GetFolderPath('Desktop')
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $links = @(
+        @{ Name = 'GPU Booster 920MX';                File = 'src\Booster.ps1';     Extra = '' },
+        @{ Name = 'GPU Booster - Restaurar todo';     File = 'src\Booster.ps1';     Extra = ' -Restaurar' },
+        @{ Name = 'GPU Booster - Diagnostico';        File = 'src\Diagnostico.ps1'; Extra = '' }
+    )
+    foreach ($ln in $links) {
+        $sc = $ws.CreateShortcut((Join-Path $desk "$($ln.Name).lnk"))
+        $sc.TargetPath = $ps
+        $sc.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $dest $ln.File)`"$($ln.Extra)"
+        $sc.WorkingDirectory = $dest
+        $sc.Save()
+    }
+    Write-Host '  Accesos directos creados en el escritorio.' -ForegroundColor Gray
+
+    Write-Host '  Abriendo GPU BOOSTER (Windows pedira permiso: pulsa SI)...' -ForegroundColor Green
+    $boost = Join-Path $dest 'src\Booster.ps1'
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$boost`"")
     Write-Host '  Listo. Sigue las instrucciones de la ventana nueva.' -ForegroundColor Green
 } catch {
     Write-Host ''

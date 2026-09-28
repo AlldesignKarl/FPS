@@ -5,6 +5,7 @@ $src = Join-Path (Split-Path -Parent $PSScriptRoot) 'src'
 . (Join-Path $src 'lib/Collectors.ps1')
 . (Join-Path $src 'lib/Plan.ps1')
 . (Join-Path $src 'lib/Report.ps1')
+. (Join-Path $src 'lib/Actions.ps1')
 
 $script:fail = 0; $script:pass = 0
 function Assert([bool]$cond, [string]$msg) {
@@ -133,6 +134,29 @@ Assert ($txt -match 'IDENTIFICACION DE GPU' -and $txt -match 'MemoriaDedicadaMB'
 Assert ($txt -match 'Prueba de turbo' -and $txt -match 'GPU Current Temp') 'Turbo y datos del driver en el informe'
 Assert ($byId['PRIORITY'].Why -match 'Process Lasso') 'Se avisa de Process Lasso'
 Assert ($byId['TURBO'].State -eq 'PENDIENTE') 'Turbo bloqueado => investigar'
+
+Write-Host 'Booster'
+$tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("gbtest_" + [guid]::NewGuid().ToString('N'))
+Initialize-BoosterState -Root $tmpRoot
+Start-BoostSession
+Add-BoostChange @{ Kind = 'priority'; Pid = 999999; Original = 'Normal' }
+Add-BoostChange @{ Kind = 'closedApp'; Key = 'Chrome'; Path = $null; Reopen = $false }
+$pend = Read-PendingSession
+Assert (@($pend.Changes).Count -eq 2 -and $pend.Changes[0].Kind -eq 'priority') 'La sesion se guarda en disco antes de cada cambio'
+$log = Restore-BoostSession -Session $pend
+Assert (-not (Test-Path (Get-SessionPath)) -and $null -eq (Read-PendingSession)) 'Restaurar borra la sesion pendiente'
+Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+$pb = $script:BoostPower
+Assert (Test-PowerValueLimits $pb[0] 0) 'PERFBOOSTPOL=0 limita el turbo'
+Assert (-not (Test-PowerValueLimits $pb[0] 100)) 'PERFBOOSTPOL=100 no limita'
+Assert (Test-PowerValueLimits $pb[1] 2700) 'PROCFREQMAX=2700 limita'
+Assert (-not (Test-PowerValueLimits $pb[1] 0)) 'PROCFREQMAX=0 no limita'
+Assert (Test-PowerValueLimits $pb[2] 0 -and -not (Test-PowerValueLimits $pb[2] 2)) 'PERFBOOSTMODE: 0 limita, 2 no'
+
+$cmp = Get-BenchmarkComparison -Before ([pscustomobject]@{ FpsAvg = 14.7; Fps1Low = 1.8 }) -After ([pscustomobject]@{ FpsAvg = 29.4; Fps1Low = 9.0 })
+Assert ([math]::Abs($cmp.DeltaFps - 14.7) -lt 0.01 -and [math]::Abs($cmp.DeltaPct - 100) -lt 0.01 -and [math]::Abs($cmp.Delta1Low - 7.2) -lt 0.01) 'Comparacion antes/despues'
+Assert ($null -eq (Get-BenchmarkComparison -Before $null -After $null)) 'Sin datos no se inventa resultado'
 
 Write-Host 'Codigo'
 # Windows PowerShell no distingue mayusculas en variables: $L y $l son la misma.

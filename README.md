@@ -7,7 +7,23 @@ Sin placebo: cada optimización se basa en una medición y tiene una explicació
 Si algo no es posible en este hardware, se marca **NO DISPONIBLE**; si no mejora el
 rendimiento, no se aplica.
 
-## Estado: FASE 1 — Diagnóstico (solo lectura)
+## AUTO BOOST (`src/Booster.ps1`)
+
+Acceso directo **GPU Booster 920MX** en el escritorio. Ábrelo ANTES que Roblox:
+
+1. Prueba el turbo de la CPU; si un ajuste de energía de Windows lo limita, lo corrige
+   y repite la prueba. Si no mejora, lo deshace.
+2. Ofrece poner el archivo de paginación en automático (evita cierres con la RAM llena).
+3. Al abrir Roblox: cierra instancias duplicadas, cierra con tu permiso Steam/Discord/Chrome/Teams/OneDrive,
+   pausa Process Lasso y pone Roblox en prioridad "Por encima de lo normal".
+4. Benchmark real de 90 s con PresentMon y comparación con el último diagnóstico.
+5. Al cerrar Roblox restaura todo y vuelve a abrir las apps.
+
+Cada cambio se guarda en `backup\sesion_activa.json` antes de hacerse; si el programa se cierra
+de golpe, se restaura al abrirlo de nuevo. **GPU Booster - Restaurar todo** devuelve Windows al
+estado anterior al primer uso (`backup\estado_original.json`).
+
+## FASE 1 — Diagnóstico (solo lectura)
 
 La fase 1 **no modifica nada** en el ordenador. Solo mide y propone.
 
